@@ -1,4 +1,5 @@
 gpxpy
 fit-tool
 pytz
+scipy
 timezonefinder
