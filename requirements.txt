@@ -1,0 +1,4 @@
+gpxpy
+fit-tool
+pytz
+timezonefinder
