@@ -18,6 +18,7 @@ import sys
 from collections import defaultdict
 from datetime import datetime, timedelta
 from math import radians, sin, cos, sqrt, atan2
+from typing import Any, Dict, List, Optional, Tuple
 
 # Third-party imports
 import gpxpy
@@ -51,7 +52,7 @@ except ImportError:
     SCIPY_AVAILABLE = False
 
 
-def haversine(lat1, lon1, lat2, lon2):
+def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Calculate distance between two points in meters using haversine formula."""
     lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
     dlat = lat2 - lat1
@@ -62,7 +63,7 @@ def haversine(lat1, lon1, lat2, lon2):
 
 
 
-def parse_inreach_csv(csv_file):
+def parse_inreach_csv(csv_file: str) -> List[Dict[str, Any]]:
     """Parse InReach CSV and return list of valid trackpoints."""
     trackpoints = []
 
@@ -102,7 +103,7 @@ def parse_inreach_csv(csv_file):
     return trackpoints
 
 
-def convert_to_local_time(trackpoints):
+def convert_to_local_time(trackpoints: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Convert UTC times to local times based on coordinates.
     Optimized: only checks timezone once per UTC day using first point of that day.
@@ -136,7 +137,7 @@ def convert_to_local_time(trackpoints):
     return trackpoints
 
 
-def get_day_key(local_time):
+def get_day_key(local_time: datetime) -> str:
     """
     Get day key for grouping tracks.
     Splits at 2am local time - times before 2am belong to previous day.
@@ -150,7 +151,7 @@ def get_day_key(local_time):
     return day
 
 
-def split_by_day(trackpoints):
+def split_by_day(trackpoints: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     """Split trackpoints into separate days (splitting at 2am local time)."""
     days = defaultdict(list)
 
@@ -161,7 +162,7 @@ def split_by_day(trackpoints):
     return days
 
 
-def linearly_interpolate_trackpoints(trackpoints, interval_seconds, max_gap_seconds=3600):
+def linearly_interpolate_trackpoints(trackpoints: List[Dict[str, Any]], interval_seconds: int, max_gap_seconds: int = 3600) -> List[Dict[str, Any]]:
     """
     Add interpolated points between existing trackpoints at regular time intervals.
 
@@ -229,13 +230,18 @@ class RouteGraph:
     Handles multiple GPX files, trail junctions, and bidirectional paths.
     """
 
-    def __init__(self, merge_threshold=10.0):
+    nodes: List[Dict[str, Any]]
+    edges: Dict[int, List[Tuple[int, float]]]
+    merge_threshold: float
+    tree: Optional[Any]
+
+    def __init__(self, merge_threshold: float = 10.0) -> None:
         self.nodes = []  # List of {lat, lon, elevation, node_id}
         self.edges = {}  # Dict: node_id -> [(neighbor_id, distance), ...]
         self.merge_threshold = merge_threshold
         self.tree = None
 
-    def _rebuild_tree(self):
+    def _rebuild_tree(self) -> None:
         """Rebuild spatial index."""
         if self.nodes:
             if not SCIPY_AVAILABLE:
@@ -243,7 +249,7 @@ class RouteGraph:
             coords = [(n['lat'], n['lon']) for n in self.nodes]
             self.tree = cKDTree(coords)
 
-    def find_or_create_node(self, lat, lon, elevation):
+    def find_or_create_node(self, lat: float, lon: float, elevation: float) -> int:
         """Find existing node within merge_threshold or create new one."""
         if not self.nodes:
             node_id = len(self.nodes)
@@ -264,7 +270,7 @@ class RouteGraph:
             self._rebuild_tree()
             return node_id
 
-    def add_edge(self, node_a, node_b, max_segment_length=None):
+    def add_edge(self, node_a: int, node_b: int, max_segment_length: Optional[float] = None) -> None:
         """
         Add bidirectional edge between two nodes, with optional densification.
 
@@ -307,7 +313,7 @@ class RouteGraph:
             if node_a not in [n for n, d in self.edges[node_b]]:
                 self.edges[node_b].append((node_a, dist))
 
-    def add_route_gpx(self, gpx_file, max_segment_length=None):
+    def add_route_gpx(self, gpx_file: str, max_segment_length: Optional[float] = None) -> int:
         """
         Add a GPX track to the graph.
 
@@ -343,7 +349,7 @@ class RouteGraph:
 
         return original_point_count
 
-    def find_nearest_node(self, lat, lon):
+    def find_nearest_node(self, lat: float, lon: float) -> Tuple[float, int]:
         """Find nearest node. Returns (distance_meters, node_id)."""
         if not self.nodes:
             return (float('inf'), None)
@@ -352,7 +358,7 @@ class RouteGraph:
         dist_meters = dist_degrees * DEGREES_TO_METERS_APPROX
         return (dist_meters, idx)
 
-    def shortest_path_astar(self, start_node, end_node, max_distance_multiplier=3.0):
+    def shortest_path_astar(self, start_node: int, end_node: int, max_distance_multiplier: float = 3.0) -> Optional[List[int]]:
         """
         A* shortest path between nodes with early termination.
 
@@ -413,7 +419,7 @@ class RouteGraph:
 
         return None  # No path found within distance limit
 
-    def path_distance(self, path):
+    def path_distance(self, path: List[int]) -> float:
         """Calculate total distance along a path."""
         if not path or len(path) < 2:
             return 0
@@ -426,7 +432,7 @@ class RouteGraph:
 
         return total
 
-    def point_at_distance(self, path, target_distance):
+    def point_at_distance(self, path: List[int], target_distance: float) -> Optional[Dict[str, float]]:
         """
         Get point at a specific distance along the path.
         Returns {lat, lon, elevation}.
@@ -461,7 +467,7 @@ class RouteGraph:
         return {'lat': node['lat'], 'lon': node['lon'], 'elevation': node['elevation']}
 
 
-def match_to_route_graph(trackpoints, route_graph, snap_tolerance, max_route_ratio, interval_seconds):
+def match_to_route_graph(trackpoints: List[Dict[str, Any]], route_graph: RouteGraph, snap_tolerance: float, max_route_ratio: float, interval_seconds: int) -> List[Dict[str, Any]]:
     """
     Match trackpoints to route graph and interpolate along the route.
 
@@ -528,7 +534,7 @@ def match_to_route_graph(trackpoints, route_graph, snap_tolerance, max_route_rat
         if not a_on_route and dist_a > 1:
             time_fraction = dist_a / total_distance if total_distance > 0 else 0
             time_to_snap = time_diff * time_fraction
-            
+
             # Interpolate elevation from A to B, not using snap node elevation
             a_snap_altitude = a.get('altitude')
             if a.get('altitude') is not None and b.get('altitude') is not None:
@@ -592,12 +598,12 @@ def match_to_route_graph(trackpoints, route_graph, snap_tolerance, max_route_rat
 
             # Calculate time fraction for B_snap in overall A→B segment
             b_snap_time_fraction = (time_diff - time_from_snap) / time_diff if time_diff > 0 else 1.0
-            
+
             # Interpolate elevation from A to B, not using snap node elevation
             b_snap_altitude = b.get('altitude')
             if a.get('altitude') is not None and b.get('altitude') is not None:
                 b_snap_altitude = a['altitude'] + b_snap_time_fraction * (b['altitude'] - a['altitude'])
-            
+
             b_snap_point = {
                 'lat': b_snap_node['lat'],
                 'lon': b_snap_node['lon'],
@@ -614,7 +620,7 @@ def match_to_route_graph(trackpoints, route_graph, snap_tolerance, max_route_rat
     return result
 
 
-def create_gpx(trackpoints, day, activity_type='hiking', trip_name=None, description=None):
+def create_gpx(trackpoints: List[Dict[str, Any]], day: str, activity_type: str = 'hiking', trip_name: Optional[str] = None, description: Optional[str] = None) -> gpxpy.gpx.GPX:
     """Create GPX object from trackpoints for a given day."""
     gpx = gpxpy.gpx.GPX()
 
@@ -654,7 +660,7 @@ def create_gpx(trackpoints, day, activity_type='hiking', trip_name=None, descrip
     return gpx
 
 
-def create_fit(trackpoints, day, activity_type='hiking', trip_name=None):
+def create_fit(trackpoints: List[Dict[str, Any]], day: str, activity_type: str = 'hiking', trip_name: Optional[str] = None) -> bytes:
     """Create FIT file from trackpoints for a given day."""
     if not FIT_AVAILABLE:
         raise ImportError("fit-tool library not installed. Install with: pip install fit-tool")
@@ -746,7 +752,7 @@ def create_fit(trackpoints, day, activity_type='hiking', trip_name=None):
     return builder.build()
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description='Convert Garmin InReach CSV to daily GPX files for Strava'
     )
