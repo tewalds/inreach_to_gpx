@@ -161,7 +161,7 @@ def split_by_day(trackpoints):
     return days
 
 
-def linearly_interpolate_trackpoints(trackpoints, interval_seconds, max_gap_seconds=3600, min_speed_mps=0.5):
+def linearly_interpolate_trackpoints(trackpoints, interval_seconds, max_gap_seconds=3600):
     """
     Add interpolated points between existing trackpoints at regular time intervals.
 
@@ -169,7 +169,6 @@ def linearly_interpolate_trackpoints(trackpoints, interval_seconds, max_gap_seco
         trackpoints: List of trackpoint dictionaries
         interval_seconds: Time interval in seconds between interpolated points
         max_gap_seconds: Don't interpolate if gap is larger than this (default: 3600 = 1 hour)
-        min_speed_mps: Don't interpolate if average speed is below this in m/s (default: 0.5 m/s = 1.8 km/h)
 
     Returns:
         List of trackpoints with interpolated points added
@@ -183,29 +182,16 @@ def linearly_interpolate_trackpoints(trackpoints, interval_seconds, max_gap_seco
         current = trackpoints[i]
         next_point = trackpoints[i + 1]
 
-        # Always add the current point
         interpolated.append(current)
 
-        # Calculate time difference
         time_diff = (next_point['time_utc'] - current['time_utc']).total_seconds()
 
-        # Skip interpolation if points are close together
         if time_diff <= interval_seconds:
             continue
 
-        # Skip interpolation if gap is too large (overnight, long breaks)
         if time_diff > max_gap_seconds:
             continue
 
-        # Calculate distance and speed using shared haversine
-        distance = haversine(current['lat'], current['lon'], next_point['lat'], next_point['lon'])
-        speed_mps = distance / time_diff if time_diff > 0 else 0
-
-        # Skip interpolation if moving too slowly (lunch break, etc)
-        if speed_mps < min_speed_mps:
-            continue
-
-        # Calculate number of intermediate points needed
         num_interpolated = int(time_diff / interval_seconds)
 
         # Add interpolated points
@@ -248,16 +234,14 @@ class RouteGraph:
         self.edges = {}  # Dict: node_id -> [(neighbor_id, distance), ...]
         self.merge_threshold = merge_threshold
         self.tree = None
-        self._tree_dirty = False
 
-    def _rebuild_tree_if_needed(self):
-        """Rebuild spatial index only when needed (after batch node additions)."""
-        if self._tree_dirty and self.nodes:
+    def _rebuild_tree(self):
+        """Rebuild spatial index."""
+        if self.nodes:
             if not SCIPY_AVAILABLE:
                 raise ImportError("scipy is required for route matching")
             coords = [(n['lat'], n['lon']) for n in self.nodes]
             self.tree = cKDTree(coords)
-            self._tree_dirty = False
 
     def find_or_create_node(self, lat, lon, elevation):
         """Find existing node within merge_threshold or create new one."""
@@ -265,52 +249,87 @@ class RouteGraph:
             node_id = len(self.nodes)
             self.nodes.append({'lat': lat, 'lon': lon, 'elevation': elevation, 'node_id': node_id})
             self.edges[node_id] = []
-            self._tree_dirty = True
+            self._rebuild_tree()
             return node_id
 
-        # Rebuild tree if needed before querying
-        self._rebuild_tree_if_needed()
-
-        # Find nearest node - dist is in degrees
         dist_degrees, idx = self.tree.query([lat, lon])
         dist_meters = dist_degrees * DEGREES_TO_METERS_APPROX
 
         if dist_meters < self.merge_threshold:
             return idx
         else:
-            # Create new node
             node_id = len(self.nodes)
             self.nodes.append({'lat': lat, 'lon': lon, 'elevation': elevation, 'node_id': node_id})
             self.edges[node_id] = []
-            self._tree_dirty = True
+            self._rebuild_tree()
             return node_id
 
-    def add_edge(self, node_a, node_b):
-        """Add bidirectional edge between two nodes."""
-        if node_a == node_b:
-            return  # Skip self-loops
+    def add_edge(self, node_a, node_b, max_segment_length=None):
+        """
+        Add bidirectional edge between two nodes, with optional densification.
 
-        # Calculate distance using shared haversine
+        Args:
+            node_a: First node ID
+            node_b: Second node ID
+            max_segment_length: If set, split long edges by adding intermediate nodes
+        """
+        if node_a == node_b:
+            return
+
         na = self.nodes[node_a]
         nb = self.nodes[node_b]
         dist = haversine(na['lat'], na['lon'], nb['lat'], nb['lon'])
 
-        # Add bidirectional edges (if not already present)
-        if node_b not in [n for n, d in self.edges[node_a]]:
-            self.edges[node_a].append((node_b, dist))
-        if node_a not in [n for n, d in self.edges[node_b]]:
-            self.edges[node_b].append((node_a, dist))
+        # If edge is too long and max_segment_length is set, add intermediate nodes
+        if max_segment_length and dist > max_segment_length:
+            num_segments = int(dist / max_segment_length) + 1
+            prev_id = node_a
 
-    def add_route_gpx(self, gpx_file):
-        """Add a GPX track to the graph."""
+            for i in range(1, num_segments):
+                fraction = i / num_segments
+
+                intermediate_id = self.find_or_create_node(
+                    na['lat'] + fraction * (nb['lat'] - na['lat']),
+                    na['lon'] + fraction * (nb['lon'] - na['lon']),
+                    na['elevation'] + fraction * (nb['elevation'] - na['elevation'])
+                )
+
+                # Add edge from previous to intermediate (recursively, but won't densify further)
+                self.add_edge(prev_id, intermediate_id, max_segment_length=None)
+                prev_id = intermediate_id
+
+            # Add final edge to node_b
+            self.add_edge(prev_id, node_b, max_segment_length=None)
+        else:
+            # Normal edge addition
+            if node_b not in [n for n, d in self.edges[node_a]]:
+                self.edges[node_a].append((node_b, dist))
+            if node_a not in [n for n, d in self.edges[node_b]]:
+                self.edges[node_b].append((node_a, dist))
+
+    def add_route_gpx(self, gpx_file, max_segment_length=None):
+        """
+        Add a GPX track to the graph.
+
+        Args:
+            gpx_file: Path to GPX file
+            max_segment_length: If set, densify long edges by adding intermediate nodes
+
+        Returns:
+            Number of original points in the GPX file
+        """
         with open(gpx_file, 'r') as f:
             gpx = gpxpy.parse(f)
+
+        original_point_count = 0
 
         for track in gpx.tracks:
             for segment in track.segments:
                 prev_node_id = None
 
                 for point in segment.points:
+                    original_point_count += 1
+
                     node_id = self.find_or_create_node(
                         point.latitude,
                         point.longitude,
@@ -318,21 +337,17 @@ class RouteGraph:
                     )
 
                     if prev_node_id is not None and prev_node_id != node_id:
-                        self.add_edge(prev_node_id, node_id)
+                        self.add_edge(prev_node_id, node_id, max_segment_length)
 
                     prev_node_id = node_id
 
-        # Rebuild tree once after loading entire GPX
-        self._rebuild_tree_if_needed()
+        return original_point_count
 
     def find_nearest_node(self, lat, lon):
         """Find nearest node. Returns (distance_meters, node_id)."""
         if not self.nodes:
             return (float('inf'), None)
 
-        self._rebuild_tree_if_needed()
-
-        # Query returns distance in degrees
         dist_degrees, idx = self.tree.query([lat, lon])
         dist_meters = dist_degrees * DEGREES_TO_METERS_APPROX
         return (dist_meters, idx)
@@ -450,72 +465,153 @@ def match_to_route_graph(trackpoints, route_graph, snap_tolerance, max_route_rat
     """
     Match trackpoints to route graph and interpolate along the route.
 
-    Args:
-        trackpoints: List of GPS trackpoints
-        route_graph: RouteGraph object
-        snap_tolerance: Max distance to snap to route (meters)
-        max_route_ratio: Max ratio of route_distance/linear_distance
-        interval_seconds: Time between interpolated points
-
-    Returns:
-        List of trackpoints with route-matched interpolation
+    Clean logic: For each segment A→B:
+    1. Determine if A and B snap to route (within tolerance)
+    2. Find path between snap nodes (unconditionally - handles parallel paths)
+    3. Check if route is reasonable (distance ratio)
+    4. Interpolate: A→A_snap (linear), A_snap→B_snap (route), B_snap→B (linear)
     """
     result = []
 
     for i in range(len(trackpoints) - 1):
-        current = trackpoints[i]
-        next_pt = trackpoints[i + 1]
+        a = trackpoints[i]
+        b = trackpoints[i + 1]
 
-        # Find nearest route nodes
-        dist_current, node_current = route_graph.find_nearest_node(current['lat'], current['lon'])
-        dist_next, node_next = route_graph.find_nearest_node(next_pt['lat'], next_pt['lon'])
+        dist_a, node_a = route_graph.find_nearest_node(a['lat'], a['lon'])
+        dist_b, node_b = route_graph.find_nearest_node(b['lat'], b['lon'])
 
-        # Check if both points snap to route
-        on_route = (dist_current < snap_tolerance and dist_next < snap_tolerance and
-                   node_current is not None and node_next is not None)
+        a_on_route = (dist_a < snap_tolerance)
+        b_on_route = (dist_b < snap_tolerance)
 
-        if on_route:
-            # Find path on route (with distance cutoff based on max_route_ratio)
-            path = route_graph.shortest_path_astar(node_current, node_next, max_route_ratio)
+        # Always try to find route path (handles crossing/parallel cases)
+        path = None
+        if a_on_route or b_on_route:
+            path = route_graph.shortest_path_astar(node_a, node_b, max_route_ratio)
 
-            if path:
-                route_distance = route_graph.path_distance(path)
-                linear_distance = haversine(current['lat'], current['lon'], next_pt['lat'], next_pt['lon'])
+        # Check if route is reasonable
+        use_route = False
+        if path:
+            linear_distance = haversine(a['lat'], a['lon'], b['lat'], b['lon'])
+            route_distance = route_graph.path_distance(path)
 
-                # Sanity check (A* already filtered, but double-check)
-                if linear_distance > 0 and route_distance / linear_distance <= max_route_ratio:
-                    # Good match - interpolate along route
-                    time_diff = (next_pt['time_utc'] - current['time_utc']).total_seconds()
+            # Only count snap distances if actually off-route
+            total_distance = route_distance
+            if not a_on_route:
+                total_distance += dist_a
+            if not b_on_route:
+                total_distance += dist_b
 
-                    # Add interpolated points along the route
-                    for t in range(0, int(time_diff), interval_seconds):
-                        fraction = t / time_diff if time_diff > 0 else 0
-                        target_dist = fraction * route_distance
+            if linear_distance > 0 and total_distance / linear_distance <= max_route_ratio:
+                use_route = True
 
-                        point_on_route = route_graph.point_at_distance(path, target_dist)
+        # Fall back to pure linear if route not usable
+        if not use_route:
+            linear_points = linearly_interpolate_trackpoints([a, b], interval_seconds)
+            result.extend(linear_points[:-1])
+            continue
 
-                        interp = {
-                            'lat': point_on_route['lat'],
-                            'lon': point_on_route['lon'],
-                            'altitude': point_on_route['elevation'],
-                            'time_utc': current['time_utc'] + timedelta(seconds=t),
-                            'time_local': (current['time_utc'] + timedelta(seconds=t)).astimezone(
-                                pytz.timezone(current['timezone'])
-                            ),
-                            'timezone': current['timezone']
-                        }
-                        result.append(interp)
+        # Use route: build segments
+        a_snap_node = route_graph.nodes[node_a]
+        b_snap_node = route_graph.nodes[node_b]
 
-                    continue  # Skip linear interpolation
+        time_diff = (b['time_utc'] - a['time_utc']).total_seconds()
+        route_distance = route_graph.path_distance(path)
 
-        # Off-route or failed sanity check - use linear interpolation
-        result.extend(linearly_interpolate_trackpoints([current, next_pt], interval_seconds))
+        # Recalculate total_distance for time distribution
+        total_distance = route_distance
+        if not a_on_route:
+            total_distance += dist_a
+        if not b_on_route:
+            total_distance += dist_b
 
-    # Add final point
+        # Phase 1: Linear A → A_snap (if needed)
+        if not a_on_route and dist_a > 1:
+            time_fraction = dist_a / total_distance if total_distance > 0 else 0
+            time_to_snap = time_diff * time_fraction
+            
+            # Interpolate elevation from A to B, not using snap node elevation
+            a_snap_altitude = a.get('altitude')
+            if a.get('altitude') is not None and b.get('altitude') is not None:
+                a_snap_altitude = a['altitude'] + time_fraction * (b['altitude'] - a['altitude'])
+
+            a_snap_point = {
+                'lat': a_snap_node['lat'],
+                'lon': a_snap_node['lon'],
+                'altitude': a_snap_altitude,
+                'time_utc': a['time_utc'] + timedelta(seconds=time_to_snap),
+                'time_local': (a['time_utc'] + timedelta(seconds=time_to_snap)).astimezone(pytz.timezone(a['timezone'])),
+                'timezone': a['timezone']
+            }
+
+            linear_points = linearly_interpolate_trackpoints([a, a_snap_point], interval_seconds)
+            result.extend(linear_points[:-1])
+
+        # Phase 2: Route A_snap → B_snap
+        time_route_start = a['time_utc']
+        if not a_on_route and dist_a > 1:
+            time_route_start = a['time_utc'] + timedelta(seconds=time_diff * (dist_a / total_distance))
+
+        time_route_end = b['time_utc']
+        if not b_on_route and dist_b > 1:
+            time_route_end = b['time_utc'] - timedelta(seconds=time_diff * (dist_b / total_distance))
+
+        time_on_route = (time_route_end - time_route_start).total_seconds()
+
+        if time_on_route > 0:
+            for t in range(0, int(time_on_route), interval_seconds):
+                fraction = t / time_on_route if time_on_route > 0 else 0
+                target_dist = fraction * route_distance
+
+                point_on_route = route_graph.point_at_distance(path, target_dist)
+
+                # Always interpolate elevation from A to B across entire segment
+                if a.get('altitude') is not None and b.get('altitude') is not None:
+                    overall_time = (time_route_start + timedelta(seconds=t) - a['time_utc']).total_seconds()
+                    overall_fraction = overall_time / time_diff if time_diff > 0 else 0
+                    altitude = a['altitude'] + overall_fraction * (b['altitude'] - a['altitude'])
+                elif point_on_route['elevation'] != 0:
+                    # Fall back to route elevation if no GPS altitude
+                    altitude = point_on_route['elevation']
+                else:
+                    altitude = a.get('altitude') or b.get('altitude')
+
+                interp = {
+                    'lat': point_on_route['lat'],
+                    'lon': point_on_route['lon'],
+                    'altitude': altitude,
+                    'time_utc': time_route_start + timedelta(seconds=t),
+                    'time_local': (time_route_start + timedelta(seconds=t)).astimezone(pytz.timezone(a['timezone'])),
+                    'timezone': a['timezone']
+                }
+                result.append(interp)
+
+        # Phase 3: Linear B_snap → B (if needed)
+        if not b_on_route and dist_b > 1:
+            time_fraction = dist_b / total_distance if total_distance > 0 else 0
+            time_from_snap = time_diff * time_fraction
+
+            # Calculate time fraction for B_snap in overall A→B segment
+            b_snap_time_fraction = (time_diff - time_from_snap) / time_diff if time_diff > 0 else 1.0
+            
+            # Interpolate elevation from A to B, not using snap node elevation
+            b_snap_altitude = b.get('altitude')
+            if a.get('altitude') is not None and b.get('altitude') is not None:
+                b_snap_altitude = a['altitude'] + b_snap_time_fraction * (b['altitude'] - a['altitude'])
+            
+            b_snap_point = {
+                'lat': b_snap_node['lat'],
+                'lon': b_snap_node['lon'],
+                'altitude': b_snap_altitude,
+                'time_utc': b['time_utc'] - timedelta(seconds=time_from_snap),
+                'time_local': (b['time_utc'] - timedelta(seconds=time_from_snap)).astimezone(pytz.timezone(b['timezone'])),
+                'timezone': b['timezone']
+            }
+
+            linear_points = linearly_interpolate_trackpoints([b_snap_point, b], interval_seconds)
+            result.extend(linear_points[:-1])
+
     result.append(trackpoints[-1])
-
     return result
-
 
 
 def create_gpx(trackpoints, day, activity_type='hiking', trip_name=None, description=None):
@@ -680,8 +776,8 @@ def main():
                         help='Add interpolated points every N seconds (e.g., 10 for best Strava results)')
     parser.add_argument('--route-gpx', action='append', dest='route_gpx_files',
                         help='Route GPX file(s) to match against. Can be specified multiple times for multiple routes.')
-    parser.add_argument('--route-tolerance', type=float, default=100.0,
-                        help='Maximum distance in meters to snap to route (default: 100)')
+    parser.add_argument('--route-tolerance', type=float, default=200.0,
+                        help='Maximum distance in meters to snap to route (default: 200)')
     parser.add_argument('--route-merge', type=float, default=10.0,
                         help='Distance in meters to merge route nodes (default: 10)')
     parser.add_argument('--max-route-ratio', type=float, default=3.0,
@@ -752,11 +848,17 @@ def main():
         print(f"\nLoading {len(args.route_gpx_files)} route GPX file(s)...")
         route_graph = RouteGraph(merge_threshold=args.route_merge)
 
+        max_segment_length = args.route_tolerance / 4
+        print(f"  Densifying long edges (>{max_segment_length:.0f}m) during load...")
+
+        total_original_points = 0
         for gpx_file in args.route_gpx_files:
             print(f"  Loading {gpx_file}...")
-            route_graph.add_route_gpx(gpx_file)
+            original_points = route_graph.add_route_gpx(gpx_file, max_segment_length=max_segment_length)
+            total_original_points += original_points
+            print(f"    {original_points} original points")
 
-        print(f"  Route graph: {len(route_graph.nodes)} nodes, {sum(len(edges) for edges in route_graph.edges.values())} edges")
+        print(f"  Route graph: {len(route_graph.nodes)} nodes ({total_original_points} original), {sum(len(edges) for edges in route_graph.edges.values())} edges")
 
     # Calculate distances and filter by minimum distance
     days_with_stats = []
@@ -779,7 +881,6 @@ def main():
             original_count = len(points)
 
             if route_graph:
-                # Use route-matched interpolation
                 points = match_to_route_graph(
                     points,
                     route_graph,
@@ -788,7 +889,6 @@ def main():
                     args.interpolate if args.interpolate else 10
                 )
             elif args.interpolate:
-                # Use linear interpolation
                 points = linearly_interpolate_trackpoints(points, args.interpolate)
 
             total_original_points += original_count

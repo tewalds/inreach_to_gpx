@@ -44,11 +44,22 @@ python inreach_to_gpx.py your_inreach_export.csv --type biking
 # Output as FIT format (better for Strava - preserves time/elevation)
 python inreach_to_gpx.py your_inreach_export.csv --format fit
 
-# Add interpolated points every 60 seconds for better Strava processing
-python inreach_to_gpx.py your_inreach_export.csv --interpolate 60
+# Add interpolated points every 10 seconds for Strava compatibility
+python inreach_to_gpx.py your_inreach_export.csv --interpolate 10
 
 # Combine FIT format with interpolation (recommended for Strava)
-python inreach_to_gpx.py your_inreach_export.csv --format fit --interpolate 60
+python inreach_to_gpx.py your_inreach_export.csv --format fit --interpolate 10
+
+# Match to route GPX for accurate distance/elevation
+python inreach_to_gpx.py your_inreach_export.csv \
+  --route-gpx trail_map.gpx \
+  --format fit
+
+# Multiple route files (main trail + side trails)
+python inreach_to_gpx.py your_inreach_export.csv \
+  --route-gpx main_trail.gpx \
+  --route-gpx spur_trail.gpx \
+  --format fit
 
 # Output both GPX and FIT
 python inreach_to_gpx.py your_inreach_export.csv --format both
@@ -94,9 +105,19 @@ python inreach_to_gpx.py your_inreach_export.csv \
 - `-f, --format` - Output format: `gpx`, `fit`, or `both` (default: gpx)
   - FIT files work better with Strava (preserves time and elevation data)
   - GPX files are more universal and easier to view
-- `--interpolate SECONDS` - Add interpolated points every N seconds (e.g., 60 for every minute)
+- `--interpolate SECONDS` - Add interpolated points every N seconds (e.g., 10 for best Strava results)
   - Helps Strava calculate moving time correctly with sparse GPS data
   - Uses linear interpolation between actual GPS points
+  - Recommended: 10 seconds for Strava compatibility
+  - Only skips gaps >1 hour (overnight/long breaks)
+- `--route-gpx FILE` - Route GPX file to match against (can specify multiple times)
+  - Snaps your track to actual trail routes for accurate distance and elevation
+  - Supports multiple GPX files for trail junctions and side trails
+- `--route-tolerance METERS` - Maximum distance to snap to route (default: 200)
+  - Increase for sparse route GPX files or less accurate GPS
+- `--route-merge METERS` - Distance to merge route nodes/junctions (default: 10)
+- `--max-route-ratio RATIO` - Max route_distance/linear_distance ratio (default: 3.0)
+  - Prevents incorrect matching on parallel trails or switchbacks
 
 This will create files named `track_YYYY-MM-DD.gpx` and/or `track_YYYY-MM-DD.fit` in the specified directory.
 
@@ -105,7 +126,7 @@ This will create files named `track_YYYY-MM-DD.gpx` and/or `track_YYYY-MM-DD.fit
 The script expects a CSV with these columns:
 - `GPSTime` - Timestamp in UTC (e.g., "3/17/2024 5:52:00 PM")
 - `Lat` - Latitude
-- `Lon` - Longitude  
+- `Lon` - Longitude
 - `AltitudeMeters` - Elevation in meters
 
 ## How It Works
@@ -150,12 +171,52 @@ InReach devices typically log points every 10-20 minutes. This sparse data can c
 - Moving time shows as "0s" because Strava thinks you teleported between points
 - Distance may be underestimated due to straight-line connections
 
-**Using `--interpolate 60`** adds points every 60 seconds via linear interpolation:
-- Helps Strava calculate moving time correctly
+**Using `--interpolate 10`** adds points every 10 seconds via linear interpolation:
+- Helps Strava calculate moving time correctly (60s intervals may still show as 0s)
 - Provides smoother tracks and better distance estimates
 - Note: Interpolated points follow straight lines, not actual terrain or trails
 
-For best Strava results, use: `--format fit --interpolate 60`
+For best Strava results, use: `--format fit --interpolate 10`
+
+### Route Matching
+
+If you have a GPX file of the actual trail you hiked, you can use `--route-gpx` to match your InReach track to the route:
+
+**Benefits:**
+- Much more accurate distance (follows actual trail, not straight lines)
+- Better elevation data from high-resolution route GPX
+- Handles switchbacks, loops, and trail junctions correctly
+
+**How it works:**
+- Builds a graph from your route GPX file(s)
+- Automatically densifies sparse routes (adds intermediate points every ~50m based on tolerance)
+- Snaps your InReach points to nearest route nodes (within tolerance)
+- Finds shortest path along the route between points using A*
+- Interpolates along the actual trail path
+- Uses route elevation when available, otherwise interpolates from InReach points
+- Falls back to linear interpolation when off-route (always adds points every 10s)
+
+**Example:**
+```bash
+# Default tolerance (200m) - good for most routes
+python inreach_to_gpx.py data.csv \
+  --route-gpx jmt_trail.gpx \
+  --format fit
+
+# Tighter tolerance for high-resolution routes
+python inreach_to_gpx.py data.csv \
+  --route-gpx detailed_trail.gpx \
+  --route-tolerance 50 \
+  --format fit
+```
+
+**Multiple routes:** Specify `--route-gpx` multiple times for trail junctions, side trails, or alternate routes. The graph automatically merges connections within `--route-merge` distance.
+
+**Limitations:**
+- Requires good quality route GPX (many trails available on AllTrails, CalTopo, etc.)
+- Sparse route GPX files are automatically densified, but may still need higher tolerance
+- Points >200m off-route fall back to linear interpolation (but still interpolate every 10s)
+- Works best with one-way routes (out-and-back routes work but may match less optimally)
 
 ## Processing Multiple Trips
 
