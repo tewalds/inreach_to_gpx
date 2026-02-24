@@ -842,20 +842,36 @@ def main() -> None:
     # Load route GPX files if provided
     route_graph = None
     if args.route_gpx_files:
-        print(f"\nLoading {len(args.route_gpx_files)} route GPX file(s)...")
-        route_graph = RouteGraph(merge_threshold=args.route_merge)
+        # Resolve any directories into files
+        resolved_files = []
+        for path in args.route_gpx_files:
+            if os.path.isdir(path):
+                for root, dirs, files in os.walk(path):
+                    for file in files:
+                        if file.lower().endswith('.gpx'):
+                            resolved_files.append(os.path.join(root, file))
+            elif os.path.isfile(path):
+                resolved_files.append(path)
+            else:
+                print(f"Warning: Path not found: {path}")
 
-        max_segment_length = args.route_tolerance / 4
-        print(f"  Densifying long edges (>{max_segment_length:.0f}m) during load...")
+        if not resolved_files:
+            print("Warning: No GPX files found in specified routes!")
+        else:
+            print(f"\nLoading {len(resolved_files)} route GPX file(s)...")
+            route_graph = RouteGraph(merge_threshold=args.route_merge)
 
-        total_original_points = 0
-        for gpx_file in args.route_gpx_files:
-            print(f"  Loading {gpx_file}...")
-            original_points = route_graph.add_route_gpx(gpx_file, max_segment_length=max_segment_length)
-            total_original_points += original_points
-            print(f"    {original_points} original points")
+            max_segment_length = args.route_tolerance / 4
+            print(f"  Densifying long edges (>{max_segment_length:.0f}m) during load...")
 
-        print(f"  Route graph: {len(route_graph.nodes)} nodes ({total_original_points} original), {sum(len(edges) for edges in route_graph.edges.values())} edges")
+            total_original_points = 0
+            for gpx_file in sorted(resolved_files):
+                print(f"  Loading {gpx_file}...")
+                original_points = route_graph.add_route_gpx(gpx_file, max_segment_length=max_segment_length)
+                total_original_points += original_points
+                print(f"    {original_points} original points")
+
+            print(f"  Route graph: {len(route_graph.nodes)} nodes ({total_original_points} original), {sum(len(edges) for edges in route_graph.edges.values())} edges")
 
     # Calculate distances and filter by minimum distance
     days_with_stats = []
