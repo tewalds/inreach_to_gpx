@@ -156,7 +156,7 @@ def split_by_day(trackpoints: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, 
     return days
 
 
-def linearly_interpolate_trackpoints(trackpoints: List[Dict[str, Any]], interval_seconds: int, max_gap_seconds: int = 3600) -> List[Dict[str, Any]]:
+def linearly_interpolate_trackpoints(trackpoints: List[Dict[str, Any]], interval_seconds: int, max_gap_seconds: int = 3600, max_speed_kmh: Optional[float] = None) -> List[Dict[str, Any]]:
     """
     Add interpolated points between existing trackpoints at regular time intervals.
 
@@ -164,6 +164,7 @@ def linearly_interpolate_trackpoints(trackpoints: List[Dict[str, Any]], interval
         trackpoints: List of trackpoint dictionaries
         interval_seconds: Time interval in seconds between interpolated points
         max_gap_seconds: Don't interpolate if gap is larger than this (default: 3600 = 1 hour)
+        max_speed_kmh: Don't interpolate if segment speed exceeds this (e.g., car ride)
 
     Returns:
         List of trackpoints with interpolated points added
@@ -186,6 +187,13 @@ def linearly_interpolate_trackpoints(trackpoints: List[Dict[str, Any]], interval
 
         if time_diff > max_gap_seconds:
             continue
+
+        # Skip interpolation if speed is too high (e.g., car ride)
+        if max_speed_kmh and max_speed_kmh > 0:
+            dist_m = haversine(current['lat'], current['lon'], next_point['lat'], next_point['lon'])
+            speed_kmh = (dist_m / time_diff) * 3.6 if time_diff > 0 else 0
+            if speed_kmh > max_speed_kmh:
+                continue
 
         num_interpolated = int(time_diff / interval_seconds)
 
@@ -444,7 +452,7 @@ class RouteGraph:
         return {'lat': node['lat'], 'lon': node['lon'], 'elevation': node['elevation']}
 
 
-def match_to_route_graph(trackpoints: List[Dict[str, Any]], route_graph: RouteGraph, snap_tolerance: float, max_route_ratio: float, interval_seconds: int) -> List[Dict[str, Any]]:
+def match_to_route_graph(trackpoints: List[Dict[str, Any]], route_graph: RouteGraph, snap_tolerance: float, max_route_ratio: float, interval_seconds: int, max_speed_kmh: Optional[float] = None) -> List[Dict[str, Any]]:
     """
     Match trackpoints to route graph and interpolate along the route.
 
@@ -459,6 +467,15 @@ def match_to_route_graph(trackpoints: List[Dict[str, Any]], route_graph: RouteGr
     for i in range(len(trackpoints) - 1):
         a = trackpoints[i]
         b = trackpoints[i + 1]
+
+        time_diff = (b['time_utc'] - a['time_utc']).total_seconds()
+        dist_linear = haversine(a['lat'], a['lon'], b['lat'], b['lon'])
+        linear_speed_kmh = (dist_linear / time_diff * 3.6) if time_diff > 0 else 0
+
+        # Skip interpolation/matching if speed is too high (e.g., car ride)
+        if max_speed_kmh and linear_speed_kmh > max_speed_kmh:
+            result.append(a)
+            continue
 
         dist_a, node_a = route_graph.find_nearest_node(a['lat'], a['lon'])
         dist_b, node_b = route_graph.find_nearest_node(b['lat'], b['lon'])
@@ -489,7 +506,7 @@ def match_to_route_graph(trackpoints: List[Dict[str, Any]], route_graph: RouteGr
 
         # Fall back to pure linear if route not usable
         if not use_route:
-            linear_points = linearly_interpolate_trackpoints([a, b], interval_seconds)
+            linear_points = linearly_interpolate_trackpoints([a, b], interval_seconds, max_speed_kmh=max_speed_kmh)
             result.extend(linear_points[:-1])
             continue
 
@@ -742,6 +759,8 @@ def main() -> None:
                         help='Activity type (default: hiking)')
     parser.add_argument('-m', '--min-distance', type=float, default=1.0,
                         help='Minimum distance in km to include a day (default: 1.0)')
+    parser.add_argument('--max-speed', type=float, default=20.0,
+                        help='Maximum speed in km/h to include a point (default: 20.0)')
     parser.add_argument('--start-date', type=str,
                         help='Start date for filtering (YYYY-MM-DD format)')
     parser.add_argument('--end-date', type=str,
@@ -864,10 +883,15 @@ def main() -> None:
                     route_graph,
                     args.route_tolerance,
                     args.max_route_ratio,
-                    args.interpolate if args.interpolate else 10
+                    args.interpolate if args.interpolate else 10,
+                    max_speed_kmh=args.max_speed
                 )
             elif args.interpolate:
-                points = linearly_interpolate_trackpoints(points, args.interpolate)
+                points = linearly_interpolate_trackpoints(
+                    points,
+                    args.interpolate,
+                    max_speed_kmh=args.max_speed
+                )
 
             total_original_points += original_count
             total_interpolated_points += len(points)
