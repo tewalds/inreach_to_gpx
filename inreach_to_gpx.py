@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # Third-party imports
 import gpxpy
 import gpxpy.gpx
+import kdtree
 import pytz
 from timezonefinder import TimezoneFinder
 
@@ -43,13 +44,6 @@ try:
     FIT_AVAILABLE = True
 except ImportError:
     FIT_AVAILABLE = False
-
-# Scipy for route matching
-try:
-    from scipy.spatial import cKDTree
-    SCIPY_AVAILABLE = True
-except ImportError:
-    SCIPY_AVAILABLE = False
 
 
 def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -239,36 +233,20 @@ class RouteGraph:
         self.nodes = []  # List of {lat, lon, elevation, node_id}
         self.edges = {}  # Dict: node_id -> [(neighbor_id, distance), ...]
         self.merge_threshold = merge_threshold
-        self.tree = None
-
-    def _rebuild_tree(self) -> None:
-        """Rebuild spatial index."""
-        if self.nodes:
-            if not SCIPY_AVAILABLE:
-                raise ImportError("scipy is required for route matching")
-            coords = [(n['lat'], n['lon']) for n in self.nodes]
-            self.tree = cKDTree(coords)
+        self.tree = kdtree.KDTree()
+        self.metric = kdtree.GreatCircle()
 
     def find_or_create_node(self, lat: float, lon: float, elevation: float) -> int:
         """Find existing node within merge_threshold or create new one."""
-        if not self.nodes:
-            node_id = len(self.nodes)
-            self.nodes.append({'lat': lat, 'lon': lon, 'elevation': elevation, 'node_id': node_id})
-            self.edges[node_id] = []
-            self._rebuild_tree()
-            return node_id
+        entry = self.tree.find_closest((lat, lon), self.metric, self.merge_threshold)
+        if entry:
+            return entry.value
 
-        dist_degrees, idx = self.tree.query([lat, lon])
-        dist_meters = dist_degrees * DEGREES_TO_METERS_APPROX
-
-        if dist_meters < self.merge_threshold:
-            return idx
-        else:
-            node_id = len(self.nodes)
-            self.nodes.append({'lat': lat, 'lon': lon, 'elevation': elevation, 'node_id': node_id})
-            self.edges[node_id] = []
-            self._rebuild_tree()
-            return node_id
+        node_id = len(self.nodes)
+        self.nodes.append({'lat': lat, 'lon': lon, 'elevation': elevation, 'node_id': node_id})
+        self.edges[node_id] = []
+        self.tree.insert((lat, lon), node_id)
+        return node_id
 
     def add_edge(self, node_a: int, node_b: int, max_segment_length: Optional[float] = None) -> None:
         """
@@ -354,9 +332,8 @@ class RouteGraph:
         if not self.nodes:
             return (float('inf'), None)
 
-        dist_degrees, idx = self.tree.query([lat, lon])
-        dist_meters = dist_degrees * DEGREES_TO_METERS_APPROX
-        return (dist_meters, idx)
+        entry = self.tree.find_closest((lat, lon), self.metric)
+        return (self.metric.dist((lat, lon), entry.p), entry.value)
 
     def shortest_path_astar(self, start_node: int, end_node: int, max_distance_multiplier: float = 3.0) -> Optional[List[int]]:
         """
@@ -846,11 +823,6 @@ def main() -> None:
     # Load route GPX files if provided
     route_graph = None
     if args.route_gpx_files:
-        if not SCIPY_AVAILABLE:
-            print("ERROR: scipy is required for route matching!")
-            print("Install with: pip install scipy --break-system-packages")
-            sys.exit(1)
-
         print(f"\nLoading {len(args.route_gpx_files)} route GPX file(s)...")
         route_graph = RouteGraph(merge_threshold=args.route_merge)
 
