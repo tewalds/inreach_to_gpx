@@ -15,6 +15,7 @@ import csv
 import heapq
 import os
 import sys
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 from math import radians, sin, cos, sqrt, atan2
@@ -25,11 +26,17 @@ import gpxpy
 import gpxpy.gpx
 import kdtree
 import pytz
+import requests
+from dotenv import load_dotenv
 from timezonefinder import TimezoneFinder
 
 # Constants
 EARTH_RADIUS_METERS = 6371000
 DEGREES_TO_METERS_APPROX = 111320  # At equator, 1 degree ≈ 111.32 km
+
+# Strava API Endpoints
+STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
+STRAVA_UPLOAD_URL = "https://www.strava.com/api/v3/uploads"
 
 # FIT file support
 try:
@@ -44,6 +51,94 @@ try:
     FIT_AVAILABLE = True
 except ImportError:
     FIT_AVAILABLE = False
+
+
+class StravaClient:
+    """Handles Strava OAuth token refreshing and file uploads."""
+
+    def __init__(self, client_id: str, client_secret: str, refresh_token: str):
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.refresh_token = refresh_token
+        self.access_token = None
+
+    def _refresh_access_token(self) -> bool:
+        """Exchange refresh token for a new access token."""
+        print("Refreshing Strava access token...")
+        payload = {
+            'client_id': self.client_id,
+            'client_secret': self.client_secret,
+            'refresh_token': self.refresh_token,
+            'grant_type': 'refresh_token'
+        }
+
+        try:
+            response = requests.post(STRAVA_TOKEN_URL, data=payload)
+            response.raise_for_status()
+            data = response.json()
+            self.access_token = data['access_token']
+            # Optional: update refresh token if it changed
+            if 'refresh_token' in data:
+                self.refresh_token = data['refresh_token']
+            return True
+        except Exception as e:
+            print(f"Error refreshing Strava token: {e}")
+            return False
+
+    def upload_activity(self, file_path: str, name: str, description: str, activity_type: str, data_type: str) -> Optional[str]:
+        """Upload a file to Strava."""
+        if not self.access_token and not self._refresh_access_token():
+            return None
+
+        headers = {"Authorization": f"Bearer {self.access_token}"}
+
+        # Map our activity types to Strava's expected sport_type
+        # Strava uses 'Hike', 'Ride', 'Run', 'Walk'
+        sport_map = {
+            'hiking': 'Hike',
+            'biking': 'Ride',
+            'running': 'Run',
+            'walking': 'Walk'
+        }
+        sport_type = sport_map.get(activity_type, 'Hike')
+
+        payload = {
+            "name": name,
+            "description": description,
+            "sport_type": sport_type,
+            "data_type": data_type
+        }
+
+        with open(file_path, 'rb') as f:
+            files = {"file": f}
+            try:
+                response = requests.post(STRAVA_UPLOAD_URL, headers=headers, data=payload, files=files)
+                response.raise_for_status()
+                return response.json().get('id_str')
+            except Exception as e:
+                if response.status_code == 409: # Conflict - likely duplicate
+                    print(f"  Skipping {os.path.basename(file_path)}: Duplicate activity detected on Strava.")
+                else:
+                    print(f"  Error uploading {os.path.basename(file_path)}: {e}")
+                    if hasattr(response, 'text'):
+                        print(f"    Details: {response.text}")
+                return None
+
+    def check_upload_status(self, upload_id: str) -> Dict[str, Any]:
+        """Check the status of an upload."""
+        if not self.access_token and not self._refresh_access_token():
+            return {}
+
+        headers = {"Authorization": f"Bearer {self.access_token}"}
+        url = f"{STRAVA_UPLOAD_URL}/{upload_id}"
+
+        try:
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            print(f"Error checking status for {upload_id}: {e}")
+            return {}
 
 
 def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -785,7 +880,25 @@ def main() -> None:
     parser.add_argument('--max-route-ratio', type=float, default=3.0,
                         help='Maximum ratio of route_distance/linear_distance (default: 3.0)')
 
+    # Strava Upload Options
+    parser.add_argument('--strava-upload', action='store_true',
+                        help='Automatically upload generated files to Strava (requires .env configuration)')
+    parser.add_argument('--strava-client-id', type=str,
+                        help='Strava API Client ID')
+    parser.add_argument('--strava-client-secret', type=str,
+                        help='Strava API Client Secret')
+    parser.add_argument('--strava-refresh-token', type=str,
+                        help='Strava API Refresh Token')
+
     args = parser.parse_args()
+
+    # Load environment variables if they exist
+    load_dotenv()
+
+    # Priority: CLI arguments -> environment variables
+    strava_client_id = args.strava_client_id or os.getenv('STRAVA_CLIENT_ID')
+    strava_client_secret = args.strava_client_secret or os.getenv('STRAVA_CLIENT_SECRET')
+    strava_refresh_token = args.strava_refresh_token or os.getenv('STRAVA_REFRESH_TOKEN')
 
     # Create output directory if it doesn't exist
     if args.output_dir != '.':
@@ -930,6 +1043,13 @@ def main() -> None:
         print("Install with: pip install fit-tool --break-system-packages")
         sys.exit(1)
 
+    # Initialize Strava client if requested
+    strava_client = None
+    if args.strava_upload and strava_client_id and strava_client_secret and strava_refresh_token:
+        strava_client = StravaClient(strava_client_id, strava_client_secret, strava_refresh_token)
+
+    pending_uploads = []
+
     # Generate GPX files
     print(f"\nProcessing {len(days_with_stats)} days:")
     exported_count = 0
@@ -965,9 +1085,76 @@ def main() -> None:
             print(f"  {day} | {day_info['timezone']:20s} | {day_info['num_points']:3d} pts | {day_info['distance_km']:6.2f} km | {files_str}")
             exported_count += 1
 
+            # Upload to Strava if client is ready
+            if strava_client:
+                # Upload the best available format (FIT > GPX)
+                upload_file = None
+                upload_format = None
+                if 'track_' + day.strftime('%Y-%m-%d') + '.fit' in files_created:
+                    upload_file = os.path.join(args.output_dir, 'track_' + day.strftime('%Y-%m-%d') + '.fit')
+                    upload_format = 'fit'
+                elif 'track_' + day.strftime('%Y-%m-%d') + '.gpx' in files_created:
+                    upload_file = os.path.join(args.output_dir, 'track_' + day.strftime('%Y-%m-%d') + '.gpx')
+                    upload_format = 'gpx'
+
+                if upload_file:
+                    print(f"    Queueing for Strava upload...", end="", flush=True)
+                    upload_name = args.name + " - " + day.strftime('%Y-%m-%d') if args.name else day.strftime('%Y-%m-%d')
+                    upload_id = strava_client.upload_activity(
+                        upload_file,
+                        upload_name,
+                        args.description,
+                        args.activity_type,
+                        upload_format
+                    )
+                    if upload_id:
+                        print(f" DONE (ID: {upload_id})")
+                        pending_uploads.append({'day': day, 'upload_id': upload_id, 'name': upload_name})
+                    else:
+                        print(" FAILED")
+
+    # Poll for Strava activity IDs and links
+    if pending_uploads:
+        print(f"\nWaiting for Strava to process {len(pending_uploads)} upload(s)...")
+        results = []
+        still_pending = pending_uploads
+
+        for attempt in range(10):
+            if not still_pending:
+                break
+
+            if attempt > 0:
+                print(f"  {len(still_pending)} still processing... checking again in {attempt * 5}s")
+                time.sleep(attempt * 5)
+
+            next_still_pending = []
+            for upload in still_pending:
+                status = strava_client.check_upload_status(upload['upload_id'])
+                if status.get('status') == 'Your upload is ready.':
+                    activity_id = status.get('activity_id')
+                    results.append({
+                        'day': upload['day'],
+                        'name': upload['name'],
+                        'link': f"https://www.strava.com/activities/{activity_id}"
+                    })
+                elif status.get('error'):
+                    print(f"  Error with upload for {upload['day']}: {status.get('error')}")
+                else:
+                    # Still processing
+                    next_still_pending.append(upload)
+
+            still_pending = next_still_pending
+
+        if results:
+            print("\nStrava Activity Links:")
+            for res in sorted(results, key=lambda x: x['day']):
+                print(f"  {res['day']}: {res['link']} ({res['name']})")
+
+        if still_pending:
+            print(f"\n{len(still_pending)} upload(s) are still processing. Check your Strava dashboard later.")
+
     format_desc = args.format.upper() if args.format != 'both' else 'GPX and FIT'
     print(f"\nExported {exported_count} days as {format_desc} files to {args.output_dir}")
-    print("Upload the files to Strava.")
 
 
 if __name__ == '__main__':

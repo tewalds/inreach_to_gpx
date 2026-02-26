@@ -1,5 +1,7 @@
 gpxpy
 fit-tool
+python-dotenv
 pytz
+requests
 scipy
 timezonefinder

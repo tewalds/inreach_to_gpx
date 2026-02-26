@@ -92,14 +92,18 @@ python inreach_to_gpx.py data.csv \
 python inreach_to_gpx.py your_inreach_export.csv \
   -o ./output -t hiking -m 0.5 -n "My Hike" \
   -d "Epic adventure in the mountains"
+
+# Upload directly to Strava
+python inreach_to_gpx.py your_inreach_export.csv --strava-upload
 ```
 
 ### Options
 
-- `-o, --output-dir` - Directory for output GPX files (default: current directory)
+- `-o, --output-dir` - Directory for output GPX/FIT files (default: current directory)
 - `-t, --type` - Activity type: `hiking`, `biking`, `running`, or `walking` (default: hiking)
 - `-m, --min-distance` - Minimum distance in km to include a day (default: 1.0)
   - Filters out rest days where GPS jitter created spurious tracks
+- `--max-speed` - Maximum speed in km/h (default: 20.0). Segments exceeding this skip interpolation (e.g., car rides)
 - `--start-date` - Start date for filtering, inclusive (YYYY-MM-DD format)
 - `--end-date` - End date for filtering, inclusive (YYYY-MM-DD format)
 - `-n, --name` - Trip name to include in GPX track names and metadata
@@ -110,9 +114,8 @@ python inreach_to_gpx.py your_inreach_export.csv \
 - `--interpolate SECONDS` - Add interpolated points every N seconds (e.g., 10 for best Strava results)
   - Helps Strava calculate moving time correctly with sparse GPS data
   - Uses linear interpolation between actual GPS points
-  - Recommended: 10 seconds for Strava compatibility
   - Only skips gaps >1 hour (overnight/long breaks)
-- `--route-gpx FILE` - Route GPX file to match against (can specify multiple times)
+- `--route-gpx PATH` - Route GPX file or directory of GPX files to match against
   - Snaps your track to actual trail routes for accurate distance and elevation
   - Supports multiple GPX files for trail junctions and side trails
 - `--route-tolerance METERS` - Maximum distance to snap to route (default: 200)
@@ -120,8 +123,43 @@ python inreach_to_gpx.py your_inreach_export.csv \
 - `--route-merge METERS` - Distance to merge route nodes/junctions (default: 10)
 - `--max-route-ratio RATIO` - Max route_distance/linear_distance ratio (default: 3.0)
   - Prevents incorrect matching on parallel trails or switchbacks
+- `--strava-upload` - Automatically upload generated activities to Strava
 
-This will create files named `track_YYYY-MM-DD.gpx` and/or `track_YYYY-MM-DD.fit` in the specified directory.
+## Strava Integration
+
+To use the automatic upload feature, you'll need to create a Strava API application and get a refresh token.
+
+### One-Time OAuth Handshake
+
+To get a `Refresh Token` with `activity:write` permissions:
+
+1.  **Configure Callback**: At [strava.com/settings/api](https://www.strava.com/settings/api), set **Authorization Callback Domain** to `localhost`.
+2.  **Authorize**: Paste this URL into your browser (replace `[ID]` with your Client ID):
+    `https://www.strava.com/oauth/authorize?client_id=[ID]&redirect_uri=http://localhost&response_type=code&scope=activity:write,read`
+3.  **Get Code**: After clicking 'Authorize', copy the `code` from the URL in your browser's address bar (e.g., `http://localhost/?code=abc123...`).
+4.  **Exchange Token**: Run this command to get your `refresh_token`:
+    ```bash
+    curl -X POST https://www.strava.com/oauth/token \
+      -F client_id=[YOUR_CLIENT_ID] \
+      -F client_secret=[YOUR_CLIENT_SECRET] \
+      -F code=[THE_CODE_FROM_STEP_3] \
+      -F grant_type=authorization_code
+    ```
+
+Update your `.env` file with the `refresh_token` from the JSON response.
+
+Once configured, run with `--strava-upload`:
+
+```bash
+python inreach_to_gpx.py data.csv --format fit --interpolate 10 --strava-upload
+```
+
+The script will:
+1.  Generate FIT/GPX files locally
+2.  Refresh your access token automatically
+3.  Upload each day's activity to Strava (prefers FIT if available)
+4.  Preserve your custom `--name` and `--description`
+5.  Skip duplicates automatically (handled by Strava API)
 
 ## CSV Format Expected
 
