@@ -549,6 +549,62 @@ class RouteGraph:
         node = self.nodes[path[-1]]
         return {'lat': node['lat'], 'lon': node['lon'], 'elevation': node['elevation']}
 
+    def to_gpx(self) -> gpxpy.gpx.GPX:
+        """Convert the graph back to a GPX object by reconstructing paths."""
+        gpx = gpxpy.gpx.GPX()
+        track = gpxpy.gpx.GPXTrack()
+        gpx.tracks.append(track)
+
+        # We'll use a simple approach to minimize segments:
+        # 1. Identify all nodes with degree != 2 (junctions and endpoints) as "seed" nodes.
+        # 2. For each seed node, follow edges to reconstruct continuous segments.
+        # 3. Handle isolated loops.
+
+        visited_edges = set()
+
+        def follow_path(start_id, first_neighbor_id):
+            segment = gpxpy.gpx.GPXTrackSegment()
+            p = self.nodes[start_id]
+            segment.points.append(gpxpy.gpx.GPXTrackPoint(p['lat'], p['lon'], elevation=p['elevation']))
+
+            curr_id = start_id
+            next_id = first_neighbor_id
+
+            while True:
+                edge = tuple(sorted((curr_id, next_id)))
+                if edge in visited_edges:
+                    break
+                visited_edges.add(edge)
+
+                p = self.nodes[next_id]
+                segment.points.append(gpxpy.gpx.GPXTrackPoint(p['lat'], p['lon'], elevation=p['elevation']))
+
+                # If next node has degree 2, continue path
+                neighbors = [n for n, d in self.edges[next_id] if n != curr_id]
+                if len(self.edges[next_id]) == 2 and neighbors:
+                    curr_id = next_id
+                    next_id = neighbors[0]
+                else:
+                    break
+            return segment
+
+        # 1. Start from junctions and endpoints
+        for node_id in range(len(self.nodes)):
+            if len(self.edges[node_id]) != 2:
+                for neighbor_id, dist in self.edges[node_id]:
+                    edge = tuple(sorted((node_id, neighbor_id)))
+                    if edge not in visited_edges:
+                        track.segments.append(follow_path(node_id, neighbor_id))
+
+        # 2. Catch isolated loops
+        for node_id in range(len(self.nodes)):
+            for neighbor_id, dist in self.edges[node_id]:
+                edge = tuple(sorted((node_id, neighbor_id)))
+                if edge not in visited_edges:
+                    track.segments.append(follow_path(node_id, neighbor_id))
+
+        return gpx
+
 
 def match_to_route_graph(trackpoints: List[Dict[str, Any]], route_graph: RouteGraph, snap_tolerance: float, max_route_ratio: float, interval_seconds: int, max_speed_kmh: Optional[float] = None) -> List[Dict[str, Any]]:
     """
@@ -882,6 +938,8 @@ def main() -> None:
                         help='Distance in meters to merge route nodes (default: 10)')
     parser.add_argument('--max-route-ratio', type=float, default=3.0,
                         help='Maximum ratio of route_distance/linear_distance (default: 3.0)')
+    parser.add_argument('--export-route-gpx', type=str,
+                        help='Export the deduped route graph to a new GPX file and exit')
 
     # Strava Upload Options
     parser.add_argument('--strava-upload', action='store_true',
@@ -988,6 +1046,14 @@ def main() -> None:
                 print(f"    {original_points} original points")
 
             print(f"  Route graph: {len(route_graph.nodes)} nodes ({total_original_points} original), {sum(len(edges) for edges in route_graph.edges.values())} edges")
+
+            if args.export_route_gpx:
+                print(f"\nExporting route graph to {args.export_route_gpx}...")
+                export_gpx = route_graph.to_gpx()
+                with open(args.export_route_gpx, 'w') as f:
+                    f.write(export_gpx.to_xml())
+                print("Done. You can now use this file with --route-gpx for faster future loads.")
+                sys.exit(0)
 
     # Calculate distances and filter by minimum distance
     days_with_stats = []
