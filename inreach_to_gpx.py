@@ -132,11 +132,14 @@ class StravaClient:
         headers = {"Authorization": f"Bearer {self.access_token}"}
         url = f"{STRAVA_UPLOAD_URL}/{upload_id}"
 
+        response = None
         try:
             response = requests.get(url, headers=headers)
             response.raise_for_status()
             return response.json()
         except Exception as e:
+            if response is not None:
+                return {'error': str(e), 'status_code': response.status_code}
             print(f"Error checking status for {upload_id}: {e}")
             return {}
 
@@ -1119,17 +1122,19 @@ def main() -> None:
         results = []
         still_pending = pending_uploads
 
-        for attempt in range(10):
-            if not still_pending:
-                break
-
-            if attempt > 0:
-                print(f"  {len(still_pending)} still processing... checking again in {attempt * 5}s")
-                time.sleep(attempt * 5)
+        for attempt in range(1, 10):
+            print(f"  {len(still_pending)} processing... checking in {attempt * 60}s")
+            time.sleep(attempt * 60)
 
             next_still_pending = []
+            rate_limited = False
             for upload in still_pending:
                 status = strava_client.check_upload_status(upload['upload_id'])
+                if status.get('status_code') == 429:
+                    print(f"  Rate limit exceeded (429). Skipping further status checks.")
+                    rate_limited = True
+                    break
+
                 if status.get('status') == 'Your upload is ready.':
                     activity_id = status.get('activity_id')
                     results.append({
@@ -1143,7 +1148,12 @@ def main() -> None:
                     # Still processing
                     next_still_pending.append(upload)
 
+            if rate_limited:
+                break
+
             still_pending = next_still_pending
+            if not still_pending:
+                break
 
         if results:
             print("\nStrava Activity Links:")

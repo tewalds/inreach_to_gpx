@@ -146,7 +146,13 @@ To get a `Refresh Token` with `activity:write` permissions:
       -F grant_type=authorization_code
     ```
 
-Update your `.env` file with the `refresh_token` from the JSON response.
+Create a `.env` file in the project root:
+
+```env
+STRAVA_CLIENT_ID=your_id
+STRAVA_CLIENT_SECRET=your_secret
+STRAVA_REFRESH_TOKEN=your_refresh_token_from_json_response
+```
 
 Once configured, run with `--strava-upload`:
 
