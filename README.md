@@ -1,3 +1,5 @@
+<img src="icon.svg" width="128" alt="InReach to Strava GPX Logo" align="right">
+
 # InReach to Strava GPX Converter
 
 Converts Garmin InReach CSV exports into daily GPX files for Strava upload.

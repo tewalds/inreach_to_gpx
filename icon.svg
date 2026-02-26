@@ -1,0 +1,51 @@
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+  <!-- InReach Mini (Vertically Centered) -->
+  <!-- Total height: 154px (Antenna: 34, Body: 120). Center should be at 128 -->
+  <g transform="translate(10, 63)">
+    <!-- Antenna on the top-left -->
+    <rect x="12" y="-12" width="22" height="34" rx="4" fill="#333" />
+    <!-- Body -->
+    <rect x="0" y="22" width="88" height="120" rx="14" fill="#FF7700" />
+    <!-- Screen -->
+    <rect x="12" y="42" width="64" height="52" rx="4" fill="#222" />
+    <!-- Buttons -->
+    <circle cx="28" cy="118" r="4.5" fill="#333" />
+    <circle cx="44" cy="118" r="4.5" fill="#333" />
+    <circle cx="60" cy="118" r="4.5" fill="#333" />
+  </g>
+  
+  <!-- Centered transition arrow -->
+  <!-- Horizontal Midpoint: 128, Vertical Midpoint: 128 -->
+  <path d="M114 128 L142 128 M132 118 L142 128 L132 138" stroke="#555" stroke-width="8" fill="none" stroke-linecap="round" stroke-linejoin="round" />
+  
+  <!-- GPX File icon (Vertically Centered to match InReach) -->
+  <g transform="translate(160, 63)">
+    <!-- Document body -->
+    <path d="M0 -12 L64 -12 L86 10 L86 142 L0 142 Z" fill="white" stroke="#555" stroke-width="5" />
+    <!-- Folded corner -->
+    <path d="M64 -12 L64 10 L86 10" fill="#eee" stroke="#555" stroke-width="5" />
+    
+    <!-- Windy Track -->
+    <path d="M20 15 C35 15 25 35 45 45 C65 55 75 75 60 100" 
+          stroke="#FC4C02" stroke-width="6" fill="none" stroke-linecap="round" stroke-linejoin="round" />
+    
+    <!-- Start Marker (Green) - Top Left -->
+    <circle cx="20" cy="15" r="6" fill="#48BB78" stroke="#333" stroke-width="1.5" />
+    
+    <!-- Finish Marker (Checkerboard) - Bottom -->
+    <g transform="translate(60, 100)">
+      <circle r="7" fill="white" stroke="#333" stroke-width="1" />
+      <clipPath id="circleClip5">
+        <circle r="7" />
+      </clipPath>
+      <g clip-path="url(#circleClip5)">
+        <rect x="0" y="-7" width="7" height="7" fill="black" />
+        <rect x="-7" y="0" width="7" height="7" fill="black" />
+      </g>
+    </g>
+
+    <!-- "GPX" Uppercase label -->
+    <rect x="5" y="115" width="76" height="22" fill="#555" rx="2" />
+    <text x="43" y="132" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="14" font-weight="900" fill="white" text-anchor="middle" letter-spacing="1">GPX</text>
+  </g>
+</svg>
